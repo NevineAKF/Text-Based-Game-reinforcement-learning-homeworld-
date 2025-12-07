@@ -1,0 +1,223 @@
+"""Tabular QL agent"""
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import framework
+import utils
+
+DEBUG = False
+
+GAMMA = 0.5  # discounted factor
+TRAINING_EP = 0.5  # epsilon-greedy parameter for training
+TESTING_EP = 0.05  # epsilon-greedy parameter for testing
+NUM_RUNS = 10
+NUM_EPOCHS = 200
+NUM_EPIS_TRAIN = 25  # number of episodes for training at each epoch
+NUM_EPIS_TEST = 50  # number of episodes for testing
+ALPHA = 0.1  # learning rate for training
+
+ACTIONS = framework.get_actions()
+OBJECTS = framework.get_objects()
+NUM_ACTIONS = len(ACTIONS)
+NUM_OBJECTS = len(OBJECTS)
+
+
+# pragma: coderesponse template
+def epsilon_greedy(state_1, state_2, q_func, epsilon):
+    """Returns an action selected by an epsilon-Greedy exploration policy
+
+    Args:
+        state_1, state_2 (int, int): two indices describing the current state
+        q_func (np.ndarray): current Q-function
+        epsilon (float): the probability of choosing a random command
+
+    Returns:
+        (int, int): the indices describing the action/object to take
+    """
+    if np.random.rand() < epsilon:
+        action_index = np.random.randint(NUM_ACTIONS)
+        object_index = np.random.randint(NUM_OBJECTS)
+        return (action_index, object_index)
+
+    # exploit: choose action with max Q
+    q_values = q_func[state_1, state_2]  # shape = [NUM_ACTIONS, NUM_OBJECTS]
+    flat_index = np.argmax(q_values)     # convert matrix to single index
+    action_index, object_index = np.unravel_index(flat_index, q_values.shape)
+
+    return (action_index, object_index)
+
+# pragma: coderesponse end
+
+
+
+
+# pragma: coderesponse template
+def tabular_q_learning(q_func, current_state_1, current_state_2, action_index,
+                       object_index, reward, next_state_1, next_state_2,
+                       terminal):
+    """Update q_func for a given transition
+
+    Args:
+        q_func (np.ndarray): current Q-function
+        current_state_1, current_state_2 (int, int): two indices describing the current state
+        action_index (int): index of the current action
+        object_index (int): index of the current object
+        reward (float): the immediate reward the agent recieves from playing current command
+        next_state_1, next_state_2 (int, int): two indices describing the next state
+        terminal (bool): True if this episode is over
+
+    Returns:
+        None
+    """
+    old_value = q_func[current_state_1, current_state_2, action_index, object_index]
+
+    if terminal:
+        target = reward
+    else:
+        target = reward + GAMMA * np.max(q_func[next_state_1, next_state_2])
+
+    new_value = (1 - ALPHA) * old_value + ALPHA * target
+
+    q_func[current_state_1, current_state_2, action_index, object_index] = new_value
+
+# pragma: coderesponse end
+
+
+
+
+
+# pragma: coderesponse template
+def run_episode(for_training):
+    epsilon = TRAINING_EP if for_training else TESTING_EP
+    epi_reward = 0
+    discount = 1.0
+
+    # --- initialize game (these are TEXTS) ---
+    (room_desc, quest_desc, terminal) = framework.newGame()
+
+    # --- convert to indices ---
+    state_r = dict_room_desc[room_desc]
+    state_q = dict_quest_desc[quest_desc]
+
+    while not terminal:
+
+        # --- choose action using indices ---
+        action_idx, object_idx = epsilon_greedy(state_r, state_q, q_func, epsilon)
+
+        # --- environment step USING TEXTS only ---
+        (new_room_desc, new_quest_desc, reward, terminal) = framework.step_game(
+            room_desc, quest_desc, action_idx, object_idx
+        )
+
+        # --- convert new state TEXT → index ---
+        new_state_r = dict_room_desc[new_room_desc]
+        new_state_q = dict_quest_desc[new_quest_desc]
+
+        # --- training update ---
+        if for_training:
+            tabular_q_learning(
+                q_func,
+                state_r, state_q,
+                action_idx, object_idx,
+                reward,
+                new_state_r, new_state_q,
+                terminal
+            )
+
+        # --- testing reward accumulation ---
+        else:
+            epi_reward += discount * reward
+            discount *= GAMMA
+
+        # --- move to next step ---
+        room_desc = new_room_desc       # text
+        quest_desc = new_quest_desc     # text
+        state_r = new_state_r           # index
+        state_q = new_state_q           # index
+
+    if not for_training:
+        return epi_reward
+    
+# pragma: coderesponse end
+
+
+
+
+
+def run_epoch():
+    """Runs one epoch and returns reward averaged over test episodes"""
+    rewards = []
+
+    for _ in range(NUM_EPIS_TRAIN):
+        run_episode(for_training=True)
+
+    for _ in range(NUM_EPIS_TEST):
+        rewards.append(run_episode(for_training=False))
+
+    return np.mean(np.array(rewards))
+
+
+def run():
+    """Returns array of test reward per epoch for one run"""
+    global q_func
+    q_func = np.zeros((NUM_ROOM_DESC, NUM_QUESTS, NUM_ACTIONS, NUM_OBJECTS))
+
+    single_run_epoch_rewards_test = []
+    pbar = tqdm(range(NUM_EPOCHS), ncols=80)
+    for _ in pbar:
+        single_run_epoch_rewards_test.append(run_epoch())
+        pbar.set_description(
+            "Avg reward: {:0.6f} | Ewma reward: {:0.6f}".format(
+                np.mean(single_run_epoch_rewards_test),
+                utils.ewma(single_run_epoch_rewards_test)))
+    return single_run_epoch_rewards_test
+
+
+if __name__ == '__main__':
+    # Data loading and build the dictionaries that use unique index for each state
+    (dict_room_desc, dict_quest_desc) = framework.make_all_states_index()
+    NUM_ROOM_DESC = len(dict_room_desc)
+    NUM_QUESTS = len(dict_quest_desc)
+
+    # set up the game
+    framework.load_game_data()
+
+    epoch_rewards_test = []  # shape NUM_RUNS * NUM_EPOCHS
+
+    for _ in range(NUM_RUNS):
+        epoch_rewards_test.append(run())
+
+    epoch_rewards_test = np.array(epoch_rewards_test)
+
+    x = np.arange(NUM_EPOCHS)
+    fig, axis = plt.subplots()
+    axis.plot(x, np.mean(epoch_rewards_test,
+                         axis=0))  # plot reward per epoch averaged per run
+    axis.set_xlabel('Epochs')
+    axis.set_ylabel('reward')
+    axis.set_title(('Tablular: nRuns=%d, Epilon=%.2f, Epi=%d, alpha=%.4f' %
+                    (NUM_RUNS, TRAINING_EP, NUM_EPIS_TRAIN, ALPHA)))
+    plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
